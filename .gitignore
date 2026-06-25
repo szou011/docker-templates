@@ -1,0 +1,20 @@
+# =============================================================================
+# .gitignore — Apache Airflow Docker development project
+# =============================================================================
+
+# Environment variables — NEVER commit secrets
+.env
+
+# Airflow logs (can be large and are ephemeral)
+logs/
+
+# Python cache
+__pycache__/
+*.py[cod]
+*.pyo
+
+# macOS
+.DS_Store
+
+# VSCode
+.vscode/
