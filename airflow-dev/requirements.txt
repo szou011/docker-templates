@@ -1,0 +1,14 @@
+# =============================================================================
+# requirements.txt — Python dependencies for your Airflow project
+# Add your packages below. The base Airflow providers are already included
+# in the official image; only add extras you specifically need.
+# =============================================================================
+
+# Example provider packages:
+# apache-airflow-providers-amazon
+# apache-airflow-providers-google
+# apache-airflow-providers-http
+
+# Example utility packages:
+# pandas
+# requests
