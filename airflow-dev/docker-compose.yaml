@@ -30,6 +30,10 @@ x-airflow-common: &airflow-common
     - ./dags:/opt/airflow/dags
     - ./logs:/opt/airflow/logs
     - ./plugins:/opt/airflow/plugins
+    # ── Domain data directories ───────────────────────────────────────────────
+    - ./data/raw:/opt/airflow/data/raw
+    - ./data/processed:/opt/airflow/data/processed
+    - ./data/exception:/opt/airflow/data/exception
 
   networks:
     - airflow-network
