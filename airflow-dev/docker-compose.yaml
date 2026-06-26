@@ -3,6 +3,11 @@
 # Apache Airflow 3.x -- Development Docker Compose
 # Executor : LocalExecutor
 # Database : PostgreSQL (latest)
+#
+# Auth: SimpleAuthManager (Airflow 3.x default)
+#   - Users are defined via AIRFLOW__CORE__SIMPLE_AUTH_MANAGER_USERS env var
+#   - Passwords are stored in a mounted JSON file (config/passwords.json)
+#   - 'airflow users create' CLI command no longer works in Airflow 3.x
 # =============================================================================
 
 x-airflow-common: &airflow-common
@@ -15,6 +20,12 @@ x-airflow-common: &airflow-common
     AIRFLOW__CORE__FERNET_KEY: ${AIRFLOW__CORE__FERNET_KEY}
     AIRFLOW__CORE__LOAD_EXAMPLES: "false"
     AIRFLOW__CORE__DAGS_FOLDER: /opt/airflow/dags
+
+    # -- Auth (SimpleAuthManager) ----------------------------------------------
+    # Format: "username:role" pairs separated by commas
+    # Roles: Admin, Op, User, Viewer
+    AIRFLOW__CORE__SIMPLE_AUTH_MANAGER_USERS: "${AIRFLOW_ADMIN_USERNAME}:Admin"
+    AIRFLOW__CORE__SIMPLE_AUTH_MANAGER_PASSWORDS_FILE: /opt/airflow/config/passwords.json
 
     # -- Database --------------------------------------------------------------
     AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
@@ -30,6 +41,7 @@ x-airflow-common: &airflow-common
     - ./dags:/opt/airflow/dags
     - ./logs:/opt/airflow/logs
     - ./plugins:/opt/airflow/plugins
+    - ./config/passwords.json:/opt/airflow/config/passwords.json:ro
     # -- Domain data directories -----------------------------------------------
     - ./data/raw:/opt/airflow/data/raw
     - ./data/processed:/opt/airflow/data/processed
@@ -70,6 +82,8 @@ services:
     restart: unless-stopped
 
   # -- Airflow Init ------------------------------------------------------------
+  # Runs DB migration only. User creation is handled by SimpleAuthManager
+  # via the passwords.json file and SIMPLE_AUTH_MANAGER_USERS env var.
   airflow-init:
     <<: *airflow-common
     container_name: airflow-init
@@ -79,16 +93,6 @@ services:
       - |
         echo "Running DB migration..."
         airflow db migrate
-
-        echo "Creating admin user..."
-        airflow users create \
-          --username "${AIRFLOW_ADMIN_USERNAME}" \
-          --password "${AIRFLOW_ADMIN_PASSWORD}" \
-          --firstname "${AIRFLOW_ADMIN_FIRSTNAME}" \
-          --lastname "${AIRFLOW_ADMIN_LASTNAME}" \
-          --email "${AIRFLOW_ADMIN_EMAIL}" \
-          --role Admin || true
-
         echo "Airflow initialisation complete."
     environment:
       <<: *airflow-common-env
@@ -108,14 +112,13 @@ services:
         condition: service_completed_successfully
     restart: unless-stopped
 
-  # -- Webserver UI ------------------------------------------------------------
-  # In Airflow 3.x the old 'webserver' command was split into:
-  #   - 'ui'         -> serves the Airflow UI (this service)
-  #   - 'api-server' -> serves the REST API (airflow-apiserver service)
-  airflow-webserver:
+  # -- API Server (serves both REST API and Web UI) ----------------------------
+  # Web UI  : http://localhost:8080
+  # REST API: http://localhost:8080/api/v2
+  airflow-apiserver:
     <<: *airflow-common
-    container_name: airflow-webserver
-    command: ui
+    container_name: airflow-apiserver
+    command: api-server
     environment:
       <<: *airflow-common-env
     ports:
@@ -127,28 +130,6 @@ services:
         condition: service_completed_successfully
     healthcheck:
       test: ["CMD", "curl", "--fail", "http://localhost:8080/health"]
-      interval: 30s
-      retries: 5
-      start_period: 30s
-      timeout: 10s
-    restart: unless-stopped
-
-  # -- API Server --------------------------------------------------------------
-  airflow-apiserver:
-    <<: *airflow-common
-    container_name: airflow-apiserver
-    command: api-server
-    environment:
-      <<: *airflow-common-env
-    ports:
-      - "9091:9091"
-    depends_on:
-      postgres:
-        condition: service_healthy
-      airflow-init:
-        condition: service_completed_successfully
-    healthcheck:
-      test: ["CMD", "curl", "--fail", "http://localhost:9091/health"]
       interval: 30s
       retries: 5
       start_period: 30s
