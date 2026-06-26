@@ -1,6 +1,6 @@
 ---
 # =============================================================================
-# Apache Airflow 3.x — Development Docker Compose
+# Apache Airflow 3.x -- Development Docker Compose
 # Executor : LocalExecutor
 # Database : PostgreSQL (latest)
 # =============================================================================
@@ -10,19 +10,19 @@ x-airflow-common: &airflow-common
     context: .
     dockerfile: Dockerfile
   environment: &airflow-common-env
-    # ── Core ──────────────────────────────────────────────────────────────────
+    # -- Core ------------------------------------------------------------------
     AIRFLOW__CORE__EXECUTOR: LocalExecutor
     AIRFLOW__CORE__FERNET_KEY: ${AIRFLOW__CORE__FERNET_KEY}
     AIRFLOW__CORE__LOAD_EXAMPLES: "false"
     AIRFLOW__CORE__DAGS_FOLDER: /opt/airflow/dags
 
-    # ── Database ──────────────────────────────────────────────────────────────
+    # -- Database --------------------------------------------------------------
     AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
 
-    # ── API / Webserver ────────────────────────────────────────────────────────
-    AIRFLOW__WEBSERVER__SECRET_KEY: ${AIRFLOW__WEBSERVER__SECRET_KEY}
+    # -- API -------------------------------------------------------------------
+    AIRFLOW__API__SECRET_KEY: ${AIRFLOW__API__SECRET_KEY}
 
-    # ── Logging ───────────────────────────────────────────────────────────────
+    # -- Logging ---------------------------------------------------------------
     AIRFLOW__LOGGING__BASE_LOG_FOLDER: /opt/airflow/logs
     AIRFLOW__LOGGING__LOGGING_LEVEL: INFO
 
@@ -30,7 +30,7 @@ x-airflow-common: &airflow-common
     - ./dags:/opt/airflow/dags
     - ./logs:/opt/airflow/logs
     - ./plugins:/opt/airflow/plugins
-    # ── Domain data directories ───────────────────────────────────────────────
+    # -- Domain data directories -----------------------------------------------
     - ./data/raw:/opt/airflow/data/raw
     - ./data/processed:/opt/airflow/data/processed
     - ./data/exception:/opt/airflow/data/exception
@@ -48,7 +48,7 @@ x-airflow-common: &airflow-common
 # =============================================================================
 services:
 
-  # ── PostgreSQL ──────────────────────────────────────────────────────────────
+  # -- PostgreSQL --------------------------------------------------------------
   postgres:
     image: postgres:latest
     container_name: airflow-postgres
@@ -56,8 +56,9 @@ services:
       POSTGRES_USER: ${POSTGRES_USER}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
       POSTGRES_DB: ${POSTGRES_DB}
+      PGDATA: /var/lib/postgresql/data
     volumes:
-      - postgres-data:/var/lib/postgresql/data
+      - postgres-data:/var/lib/postgresql
     networks:
       - airflow-network
     healthcheck:
@@ -68,7 +69,7 @@ services:
       timeout: 5s
     restart: unless-stopped
 
-  # ── Airflow Init ────────────────────────────────────────────────────────────
+  # -- Airflow Init ------------------------------------------------------------
   airflow-init:
     <<: *airflow-common
     container_name: airflow-init
@@ -93,7 +94,7 @@ services:
       <<: *airflow-common-env
     restart: "no"
 
-  # ── Scheduler ───────────────────────────────────────────────────────────────
+  # -- Scheduler ---------------------------------------------------------------
   airflow-scheduler:
     <<: *airflow-common
     container_name: airflow-scheduler
@@ -107,11 +108,14 @@ services:
         condition: service_completed_successfully
     restart: unless-stopped
 
-  # ── Webserver ───────────────────────────────────────────────────────────────
+  # -- Webserver UI ------------------------------------------------------------
+  # In Airflow 3.x the old 'webserver' command was split into:
+  #   - 'ui'         -> serves the Airflow UI (this service)
+  #   - 'api-server' -> serves the REST API (airflow-apiserver service)
   airflow-webserver:
     <<: *airflow-common
     container_name: airflow-webserver
-    command: webserver
+    command: ui
     environment:
       <<: *airflow-common-env
     ports:
@@ -129,7 +133,7 @@ services:
       timeout: 10s
     restart: unless-stopped
 
-  # ── API Server ───────────────────────────────────────────────────────────────
+  # -- API Server --------------------------------------------------------------
   airflow-apiserver:
     <<: *airflow-common
     container_name: airflow-apiserver
