@@ -130,6 +130,28 @@ services:
         condition: service_completed_successfully
     restart: unless-stopped
 
+  # -- Triggerer ---------------------------------------------------------------
+  # Runs deferrable operators / async triggers. Without it, any task that
+  # defers gets stuck in the "deferred" state forever.
+  airflow-triggerer:
+    <<: *airflow-common
+    container_name: airflow-triggerer
+    command: triggerer
+    environment:
+      <<: *airflow-common-env
+    depends_on:
+      postgres:
+        condition: service_healthy
+      airflow-init:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD-SHELL", 'airflow jobs check --job-type TriggererJob --hostname "$${HOSTNAME}"']
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    restart: unless-stopped
+
   # -- Scheduler ---------------------------------------------------------------
   airflow-scheduler:
     <<: *airflow-common

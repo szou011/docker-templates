@@ -7,8 +7,9 @@ A simple, reasonably secure single-host Airflow 3.x setup for development.
 - **Auth:** `SimpleAuthManager` (Airflow 3.x default), credentials in a
   JSON file under `config/`
 - **Services:** `postgres`, `airflow-init` (DB migration),
-  `airflow-dag-processor` (parses DAG files), `airflow-scheduler`,
-  `airflow-apiserver` (UI + REST API)
+  `airflow-dag-processor` (parses DAG files), `airflow-triggerer` (runs
+  deferrable operators), `airflow-scheduler`, `airflow-apiserver`
+  (UI + REST API)
 
 The UI is bound to `127.0.0.1:8080` so it is **not** reachable from your LAN.
 On WSL2 it is still reachable from Windows at <http://localhost:8080> via WSL2's
@@ -169,6 +170,9 @@ Restart the stack afterwards.
   `airflow-dag-processor` service is running (`docker compose ps`). In Airflow
   3.x the scheduler does not parse DAG files; the dag-processor does. Check its
   logs with `docker compose logs -f dag-processor`.
+- **A task is stuck in the `deferred` state** — the `airflow-triggerer` service
+  isn't running. Deferrable operators hand off to the triggerer to resume; check
+  `docker compose ps` and `docker compose logs -f triggerer`.
 - **`http://localhost:8080` unreachable from Windows (WSL2)** — restart WSL with
   `wsl --shutdown`; the localhost relay occasionally needs a kick.
 - **Postgres won't start after an image change** — Postgres 18 stores data under
