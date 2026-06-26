@@ -2,11 +2,12 @@
 # =============================================================================
 # Apache Airflow 3.x -- Development Docker Compose
 # Executor : LocalExecutor
-# Database : PostgreSQL (latest)
+# Database : PostgreSQL 18
 #
 # Auth: SimpleAuthManager (Airflow 3.x default)
 #   - Users are defined via AIRFLOW__CORE__SIMPLE_AUTH_MANAGER_USERS env var
-#   - Passwords are stored in a mounted JSON file (config/passwords.json)
+#   - Passwords are read from a pre-seeded JSON file (config/passwords.json),
+#     mounted read-only. See README for how to create it.
 #   - 'airflow users create' CLI command no longer works in Airflow 3.x
 # =============================================================================
 
@@ -14,10 +15,15 @@ x-airflow-common: &airflow-common
   build:
     context: .
     dockerfile: Dockerfile
+  # Run containers as the host user (group 0) so files written to bind-mounted
+  # dags/, logs/, plugins/ and data/ are owned by you, not root. Defaults to the
+  # image's airflow user (50000) if AIRFLOW_UID is unset.
+  user: "${AIRFLOW_UID:-50000}:0"
   environment: &airflow-common-env
     # -- Core ------------------------------------------------------------------
     AIRFLOW__CORE__EXECUTOR: LocalExecutor
-    AIRFLOW__CORE__FERNET_KEY: ${AIRFLOW__CORE__FERNET_KEY}
+    # Fail fast if the key is missing rather than booting with a broken config.
+    AIRFLOW__CORE__FERNET_KEY: ${AIRFLOW__CORE__FERNET_KEY:?FERNET_KEY is not set - generate one and add it to .env}
     AIRFLOW__CORE__LOAD_EXAMPLES: "false"
     AIRFLOW__CORE__DAGS_FOLDER: /opt/airflow/dags
 
@@ -31,7 +37,7 @@ x-airflow-common: &airflow-common
     AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
 
     # -- API -------------------------------------------------------------------
-    AIRFLOW__API__SECRET_KEY: ${AIRFLOW__API__SECRET_KEY}
+    AIRFLOW__API__SECRET_KEY: ${AIRFLOW__API__SECRET_KEY:?API SECRET_KEY is not set - generate one and add it to .env}
 
     # -- Logging ---------------------------------------------------------------
     AIRFLOW__LOGGING__BASE_LOG_FOLDER: /opt/airflow/logs
@@ -62,13 +68,19 @@ services:
 
   # -- PostgreSQL --------------------------------------------------------------
   postgres:
-    image: postgres:latest
+    # Pinned to a major version. 'latest' can silently jump major versions on a
+    # future pull and refuse to start on an existing data directory.
+    #
+    # PGDATA is intentionally NOT set: postgres:18 uses a version-specific data
+    # dir (/var/lib/postgresql/18/docker) under the volume mounted below, which
+    # enables fast pg_upgrade --link across future major versions. The volume is
+    # mounted at /var/lib/postgresql (the VOLUME declared by the 18+ image).
+    image: postgres:18
     container_name: airflow-postgres
     environment:
       POSTGRES_USER: ${POSTGRES_USER}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
       POSTGRES_DB: ${POSTGRES_DB}
-      PGDATA: /var/lib/postgresql/data
     volumes:
       - postgres-data:/var/lib/postgresql
     networks:
@@ -82,21 +94,38 @@ services:
     restart: unless-stopped
 
   # -- Airflow Init ------------------------------------------------------------
-  # Runs DB migration only. User creation is handled by SimpleAuthManager
-  # via the passwords.json file and SIMPLE_AUTH_MANAGER_USERS env var.
+  # Runs the DB migration only (idempotent). User creation is handled by
+  # SimpleAuthManager via passwords.json and SIMPLE_AUTH_MANAGER_USERS.
+  #
+  # Uses the image's default entrypoint (same as the other services) so that
+  # `airflow db migrate` runs with the built-in DB-connection wait, and a
+  # migration failure exits non-zero. That makes service_completed_successfully
+  # actually mean "migration succeeded", so the scheduler/apiserver never start
+  # against a half-migrated database.
   airflow-init:
     <<: *airflow-common
     container_name: airflow-init
-    entrypoint: /bin/bash
-    command:
-      - -c
-      - |
-        echo "Running DB migration..."
-        airflow db migrate
-        echo "Airflow initialisation complete."
+    command: db migrate
     environment:
       <<: *airflow-common-env
     restart: "no"
+
+  # -- DAG Processor -----------------------------------------------------------
+  # Airflow 3.x parses DAG files in a separate process, isolated from the
+  # scheduler (which no longer has access to DAG files). Required for DAGs
+  # dropped into ./dags to be detected and scheduled.
+  airflow-dag-processor:
+    <<: *airflow-common
+    container_name: airflow-dag-processor
+    command: dag-processor
+    environment:
+      <<: *airflow-common-env
+    depends_on:
+      postgres:
+        condition: service_healthy
+      airflow-init:
+        condition: service_completed_successfully
+    restart: unless-stopped
 
   # -- Scheduler ---------------------------------------------------------------
   airflow-scheduler:
@@ -122,7 +151,10 @@ services:
     environment:
       <<: *airflow-common-env
     ports:
-      - "8080:8080"
+      # Bind to loopback only so the UI/API is not exposed to the LAN.
+      # Still reachable from Windows as http://localhost:8080 via WSL2's
+      # localhost forwarding. Use "0.0.0.0:8080:8080" to expose it on the LAN.
+      - "127.0.0.1:8080:8080"
     depends_on:
       postgres:
         condition: service_healthy

@@ -5,8 +5,14 @@
 # Environment variables — NEVER commit secrets
 .env
 
+# SimpleAuthManager credentials — NEVER commit
+config/passwords.json
+
 # Airflow logs (can be large and are ephemeral)
 logs/
+
+# Domain data produced/consumed by DAGs
+data/
 
 # Python cache
 __pycache__/
