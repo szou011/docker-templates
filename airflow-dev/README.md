@@ -4,8 +4,8 @@ A simple, reasonably secure single-host Airflow 3.x setup for development.
 
 - **Executor:** `LocalExecutor`
 - **Database:** PostgreSQL 18 (internal network only, not exposed)
-- **Auth:** `SimpleAuthManager` (Airflow 3.x default), passwords pre-seeded in a
-  read-only JSON file
+- **Auth:** `SimpleAuthManager` (Airflow 3.x default), credentials in a
+  JSON file under `config/`
 - **Services:** `postgres`, `airflow-init` (DB migration),
   `airflow-dag-processor` (parses DAG files), `airflow-scheduler`,
   `airflow-apiserver` (UI + REST API)
@@ -59,15 +59,21 @@ Then edit `.env` and fill in the values:
 
 ### 3. Create the password file
 
-`SimpleAuthManager` reads admin credentials from `config/passwords.json`, which
-is mounted **read-only**. You must create it before the first start. The key
-must match `AIRFLOW_ADMIN_USERNAME` from your `.env`:
+`SimpleAuthManager` keeps admin credentials in `config/passwords.json`. The
+`config/` directory is mounted **read-write**, because SimpleAuthManager rewrites
+this file on startup. The JSON key must match `AIRFLOW_ADMIN_USERNAME`:
 
 ```bash
 echo '{"admin": "choose-a-strong-password"}' > config/passwords.json
 ```
 
-This file contains a secret and is **git-ignored** — never commit it.
+If you skip this and leave the file absent, SimpleAuthManager will generate a
+random password on first boot and write it here — read it back with
+`cat config/passwords.json`.
+
+This file contains a secret and is **git-ignored** — never commit it. The file
+must be writable by the container UID (`AIRFLOW_UID`); if it's owned by a
+different user you'll see `Errno 30 (read-only)` or `Errno 13 (permission)`.
 
 ### 4. Build and start
 
@@ -154,6 +160,11 @@ Restart the stack afterwards.
   `SIMPLE_AUTH_MANAGER_USERS`.
 - **Permission denied writing logs** — the bind-mounted dirs are owned by root.
   Set `AIRFLOW_UID` in `.env` to your `id -u` and recreate the dirs (step 1).
+- **`OSError [Errno 30] read-only file system: .../config/passwords.json`** —
+  SimpleAuthManager needs to write this file on startup. The `config/` dir must
+  be mounted read-write (it is, by default — don't add `:ro`). `Errno 13` on the
+  same path means the file is owned by a different user than `AIRFLOW_UID`;
+  `chown`/`chmod` it so the container UID can write.
 - **DAGs in `dags/` don't appear in the UI** — make sure the
   `airflow-dag-processor` service is running (`docker compose ps`). In Airflow
   3.x the scheduler does not parse DAG files; the dag-processor does. Check its

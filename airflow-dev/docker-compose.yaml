@@ -6,8 +6,8 @@
 #
 # Auth: SimpleAuthManager (Airflow 3.x default)
 #   - Users are defined via AIRFLOW__CORE__SIMPLE_AUTH_MANAGER_USERS env var
-#   - Passwords are read from a pre-seeded JSON file (config/passwords.json),
-#     mounted read-only. See README for how to create it.
+#   - Passwords live in config/passwords.json (the config/ dir is mounted
+#     read-write; SimpleAuthManager rewrites this file on startup). See README.
 #   - 'airflow users create' CLI command no longer works in Airflow 3.x
 # =============================================================================
 
@@ -47,7 +47,10 @@ x-airflow-common: &airflow-common
     - ./dags:/opt/airflow/dags
     - ./logs:/opt/airflow/logs
     - ./plugins:/opt/airflow/plugins
-    - ./config/passwords.json:/opt/airflow/config/passwords.json:ro
+    # Whole config dir, read-write: SimpleAuthManager opens passwords.json for
+    # writing on startup (it persists/normalises the user->password map), so a
+    # read-only or single-file mount fails with EROFS / rename errors.
+    - ./config:/opt/airflow/config
     # -- Domain data directories -----------------------------------------------
     - ./data/raw:/opt/airflow/data/raw
     - ./data/processed:/opt/airflow/data/processed
