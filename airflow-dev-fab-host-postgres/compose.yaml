@@ -1,0 +1,253 @@
+---
+# =============================================================================
+# Apache Airflow 3.x -- Development Docker Compose
+# Executor : LocalExecutor
+# Database : PostgreSQL running on the HOST (not containerized)
+#
+# Host-Postgres prerequisites (configure these on the host once):
+#   - postgresql.conf : listen_addresses = '*'  (or the Docker bridge address)
+#   - pg_hba.conf     : allow the Docker subnet, e.g.
+#                       host all all 172.16.0.0/12 scram-sha-256  (then reload)
+#   - The role/database in POSTGRES_USER/POSTGRES_DB must already exist;
+#     airflow-init only runs migrations, it does not create the role/db.
+#
+# Auth: FAB auth manager (Flask AppBuilder)
+#   - FAB is NOT bundled in Airflow 3.x. The image must install the provider:
+#       RUN pip install apache-airflow-providers-fab      # in the Dockerfile
+#   - Users live in the metadata DB, not in config/passwords.json. The admin
+#     user is created by airflow-init via `airflow users create` using the
+#     AIRFLOW_ADMIN_* env vars (see .env).
+#   - Auth is configured via config/webserver_config.py (AUTH_TYPE = AUTH_DB,
+#     rate limiting, RBAC, ...). Airflow auto-generates a default one on first
+#     run if it is absent; keep the config/ mount read-write so it persists.
+#   - FAB has its own DB tables: `airflow fab-db migrate` is run in addition to
+#     the core `airflow db migrate`.
+# =============================================================================
+
+x-airflow-common: &airflow-common
+  build:
+    context: .
+    dockerfile: Dockerfile
+  # Inject everything from .env into the containers (connections, secrets,
+  # AIRFLOW_CONN_* / custom vars your DAGs read). Compose reads .env for YAML
+  # substitution, but that does NOT put those vars inside the containers --
+  # env_file does. Override the path with ENV_FILE_PATH if needed.
+  env_file:
+    - ${ENV_FILE_PATH:-.env}
+  # Run containers as the host user (group 0) so files written to bind-mounted
+  # dags/, logs/, plugins/ and data/ are owned by you, not root. Defaults to the
+  # image's airflow user (50000) if AIRFLOW_UID is unset.
+  user: "${AIRFLOW_UID:-50000}:0"
+  environment: &airflow-common-env
+    # -- Core ------------------------------------------------------------------
+    AIRFLOW__CORE__EXECUTOR: LocalExecutor
+    # Fail fast if the key is missing rather than booting with a broken config.
+    AIRFLOW__CORE__FERNET_KEY: ${AIRFLOW__CORE__FERNET_KEY:?FERNET_KEY is not set - generate one and add it to .env}
+    AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+    AIRFLOW__CORE__DAGS_FOLDER: /opt/airflow/dags
+
+    # -- Scheduler -------------------------------------------------------------
+    # Run the scheduler's built-in HTTP health server (port 8974) so the
+    # container healthcheck below has something to probe.
+    AIRFLOW__SCHEDULER__ENABLE_HEALTH_CHECK: "true"
+
+    # -- Auth (FAB auth manager) ----------------------------------------------
+    # Requires apache-airflow-providers-fab installed in the image. Users are
+    # stored in the metadata DB and managed via the `airflow users` /
+    # `airflow roles` CLI. Auth settings live in config/webserver_config.py.
+    AIRFLOW__CORE__AUTH_MANAGER: airflow.providers.fab.auth_manager.fab_auth_manager.FabAuthManager
+
+    # -- Database (PostgreSQL on the host) -------------------------------------
+    # host.docker.internal resolves to the host on Docker Desktop (Mac/Windows)
+    # and WSL2; on native Linux it resolves via the extra_hosts mapping below.
+    AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://${POSTGRES_USER}:${POSTGRES_PASSWORD}@${POSTGRES_HOST:-host.docker.internal}:${POSTGRES_PORT:-5432}/${POSTGRES_DB}
+
+    # -- API -------------------------------------------------------------------
+    # Also used by FAB to sign the login session cookie.
+    AIRFLOW__API__SECRET_KEY: ${AIRFLOW__API__SECRET_KEY:?API SECRET_KEY is not set - generate one and add it to .env}
+
+    # -- Logging ---------------------------------------------------------------
+    AIRFLOW__LOGGING__BASE_LOG_FOLDER: /opt/airflow/logs
+    AIRFLOW__LOGGING__LOGGING_LEVEL: INFO
+
+  volumes:
+    - ./dags:/opt/airflow/dags
+    - ./logs:/opt/airflow/logs
+    - ./plugins:/opt/airflow/plugins
+    # Whole config dir, read-write: FAB reads config/webserver_config.py for its
+    # auth configuration and auto-generates a default one on first run if it is
+    # missing, so the mount must be writable for that file to persist.
+    - ./config:/opt/airflow/config
+    # -- Domain data directories -----------------------------------------------
+    - ./data/raw:/opt/airflow/data/raw
+    - ./data/processed:/opt/airflow/data/processed
+    - ./data/exception:/opt/airflow/data/exception
+
+  networks:
+    - airflow-network
+
+  # Make the host reachable as host.docker.internal on native Linux too
+  # (Docker Desktop on Mac/Windows and WSL2 provide this name automatically).
+  extra_hosts:
+    - "host.docker.internal:host-gateway"
+
+
+# =============================================================================
+# Services
+# =============================================================================
+services:
+
+  # NOTE: No 'postgres' service here -- this compose file connects to a
+  # PostgreSQL instance running on the host (see the connection string above
+  # and the host-side prerequisites in the header comment).
+
+  # -- Airflow Init ------------------------------------------------------------
+  # Runs DB migrations and creates the FAB admin user (idempotent):
+  #   1. `airflow db migrate`      -- core metadata tables
+  #   2. `airflow fab-db migrate`  -- FAB auth manager tables (separate in 3.x)
+  #   3. `airflow users create`    -- admin user from AIRFLOW_ADMIN_* env vars
+  #      (`|| true` so re-runs don't fail when the user already exists, which
+  #      would otherwise break service_completed_successfully downstream).
+  airflow-init:
+    <<: *airflow-common
+    container_name: airflow-init
+    # Keep the image's default entrypoint (do NOT override it): it sets up the
+    # Python env so `airflow` is importable and runs the DB-connection wait.
+    # Pass the script via `bash -c` instead -- same pattern as airflow-cli below.
+    command:
+      - bash
+      - -c
+      - |
+        airflow db migrate && \
+        airflow fab-db migrate && \
+        airflow users create \
+          --username "$${AIRFLOW_ADMIN_USERNAME}" \
+          --password "$${AIRFLOW_ADMIN_PASSWORD}" \
+          --firstname "$${AIRFLOW_ADMIN_FIRSTNAME:-Admin}" \
+          --lastname  "$${AIRFLOW_ADMIN_LASTNAME:-User}" \
+          --email     "$${AIRFLOW_ADMIN_EMAIL:-admin@example.com}" \
+          --role Admin || true
+    environment:
+      <<: *airflow-common-env
+    restart: "no"
+
+  # -- DAG Processor -----------------------------------------------------------
+  # Airflow 3.x parses DAG files in a separate process, isolated from the
+  # scheduler (which no longer has access to DAG files). Required for DAGs
+  # dropped into ./dags to be detected and scheduled.
+  airflow-dag-processor:
+    <<: *airflow-common
+    container_name: airflow-dag-processor
+    command: dag-processor
+    environment:
+      <<: *airflow-common-env
+    depends_on:
+      airflow-init:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD-SHELL", 'airflow jobs check --job-type DagProcessorJob --hostname "$${HOSTNAME}"']
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    restart: unless-stopped
+
+  # -- Triggerer ---------------------------------------------------------------
+  # Runs deferrable operators / async triggers. Without it, any task that
+  # defers gets stuck in the "deferred" state forever.
+  airflow-triggerer:
+    <<: *airflow-common
+    container_name: airflow-triggerer
+    command: triggerer
+    environment:
+      <<: *airflow-common-env
+    depends_on:
+      airflow-init:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD-SHELL", 'airflow jobs check --job-type TriggererJob --hostname "$${HOSTNAME}"']
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    restart: unless-stopped
+
+  # -- Scheduler ---------------------------------------------------------------
+  airflow-scheduler:
+    <<: *airflow-common
+    container_name: airflow-scheduler
+    command: scheduler
+    environment:
+      <<: *airflow-common-env
+    depends_on:
+      airflow-init:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "http://localhost:8974/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    restart: unless-stopped
+
+  # -- API Server (serves both REST API and Web UI) ----------------------------
+  # Web UI  : http://localhost:8080
+  # REST API: http://localhost:8080/api/v2
+  airflow-apiserver:
+    <<: *airflow-common
+    container_name: airflow-apiserver
+    command: api-server
+    environment:
+      <<: *airflow-common-env
+    ports:
+      # Bind to loopback only so the UI/API is not exposed to the LAN.
+      # Still reachable from Windows as http://localhost:8080 via WSL2's
+      # localhost forwarding. Use "0.0.0.0:8080:8080" to expose it on the LAN.
+      - "0.0.0.0:8080:8080"
+    depends_on:
+      airflow-init:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "http://localhost:8080/health"]
+      interval: 30s
+      retries: 5
+      start_period: 30s
+      timeout: 10s
+    restart: unless-stopped
+
+  # -- CLI (debug profile) -----------------------------------------------------
+  # Ad-hoc Airflow commands without exec-ing into a running container, e.g.:
+  #   docker compose --profile debug run --rm airflow-cli airflow dags list
+  # Only starts when the 'debug' profile is requested, so it never runs as part
+  # of a normal `docker compose up`.
+  airflow-cli:
+    <<: *airflow-common
+    container_name: airflow-cli
+    profiles:
+      - debug
+    environment:
+      <<: *airflow-common-env
+      # Skip the entrypoint's DB-connection wait loop for quick one-off commands.
+      CONNECTION_CHECK_MAX_COUNT: "0"
+    # Workaround for entrypoint issue. See:
+    # https://github.com/apache/airflow/issues/16252
+    command:
+      - bash
+      - -c
+      - airflow
+
+
+# =============================================================================
+# Volumes
+# =============================================================================
+# No named volumes: PostgreSQL data lives on the host, and dags/logs/plugins/
+# config/data are bind-mounted from this directory.
+
+
+# =============================================================================
+# Networks
+# =============================================================================
+networks:
+  airflow-network:
+    name: airflow-network
+    driver: bridge
