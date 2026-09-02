@@ -3,17 +3,37 @@
 A simple, reasonably secure single-host Airflow 3.x setup for development.
 
 - **Executor:** `LocalExecutor`
-- **Database:** PostgreSQL 18 (internal network only, not exposed)
-- **Auth:** `SimpleAuthManager` (Airflow 3.x default), credentials in a
-  JSON file under `config/`
-- **Services:** `postgres`, `airflow-init` (DB migration),
+- **Database:** PostgreSQL running **on the host** (not containerized), reached
+  from containers via `host.docker.internal`
+- **Auth:** FAB Auth Manager (`apache-airflow-providers-fab`, Flask
+  AppBuilder). Users live in the metadata DB; the admin user is created by
+  `airflow-init` from the `AIRFLOW_ADMIN_*` env vars
+- **Services:** `airflow-init` (DB migration + admin user),
   `airflow-dag-processor` (parses DAG files), `airflow-triggerer` (runs
   deferrable operators), `airflow-scheduler`, `airflow-apiserver`
-  (UI + REST API)
+  (UI + REST API), plus an `airflow-cli` debug-profile service for ad-hoc
+  Airflow CLI commands
 
-The UI is bound to `127.0.0.1:8080` so it is **not** reachable from your LAN.
-On WSL2 it is still reachable from Windows at <http://localhost:8080> via WSL2's
-localhost forwarding.
+## Host PostgreSQL prerequisites
+
+There is **no** `postgres` service in this stack. Before first run, configure
+PostgreSQL on the host once:
+
+- `postgresql.conf`: `listen_addresses = '*'` (or at least the Docker bridge
+  address)
+- `pg_hba.conf`: allow the Docker subnet, e.g.
+  `host all all 172.16.0.0/12 scram-sha-256`, then reload Postgres
+- Create the role and database matching `POSTGRES_USER` / `POSTGRES_DB` in
+  `.env` yourself — `airflow-init` only runs migrations, it does not create
+  the role/db.
+
+From inside containers the host is reachable as `host.docker.internal` on
+Docker Desktop (Mac/Windows) and WSL2; on native Linux the compose file maps
+it via `extra_hosts: host-gateway`.
+
+> **Note:** the API server port is currently published as `0.0.0.0:8080:8080`,
+> i.e. the UI **is reachable from your LAN**. See *Security notes* to restrict
+> it to loopback.
 
 ---
 
@@ -50,50 +70,40 @@ Then edit `.env` and fill in the values:
 | Variable | How to set it |
 |---|---|
 | `AIRFLOW_UID` | Run `echo $(id -u)` and paste the result (Linux/WSL2). Ensures bind-mounted files are owned by you. |
-| `POSTGRES_USER` / `POSTGRES_PASSWORD` / `POSTGRES_DB` | Defaults are fine for local dev; change the password if you like. Postgres is not exposed outside the Docker network. |
+| `POSTGRES_USER` / `POSTGRES_PASSWORD` / `POSTGRES_DB` | Credentials of the **host** PostgreSQL instance; the role and database must already exist (see above). |
+| `POSTGRES_HOST` / `POSTGRES_PORT` | Defaults (`host.docker.internal` / `5432`) are usually fine; change only if your host Postgres differs. |
 | `AIRFLOW__CORE__FERNET_KEY` | `python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"` |
 | `AIRFLOW__API__SECRET_KEY` | `python -c "import secrets; print(secrets.token_hex(32))"` |
-| `AIRFLOW_ADMIN_USERNAME` | Username for the admin account (default `admin`). |
+| `AIRFLOW_ADMIN_USERNAME` / `AIRFLOW_ADMIN_PASSWORD` | Credentials for the initial admin account, created by `airflow-init`. |
+| `AIRFLOW_ADMIN_FIRSTNAME` / `AIRFLOW_ADMIN_LASTNAME` / `AIRFLOW_ADMIN_EMAIL` | Optional; have sensible defaults. |
+| `AIRFLOW__API_AUTH__JWT_SECRET` / `AIRFLOW__API_AUTH__JWT_ISSUER` | Optional; used to sign REST API JWTs. Set `JWT_SECRET` explicitly — the compose file's built-in default is not a secret. |
 
 > Compose will refuse to start if `FERNET_KEY` or `API__SECRET_KEY` are empty —
 > this is intentional, to avoid booting with a broken config.
+>
+> `.env` is injected into the containers via `env_file`, so any
+> `AIRFLOW_CONN_*` / custom variables you add there are visible to your DAGs.
 
-### 3. Create the password file
-
-`SimpleAuthManager` keeps admin credentials in `config/passwords.json`. The
-`config/` directory is mounted **read-write**, because SimpleAuthManager rewrites
-this file on startup. The JSON key must match `AIRFLOW_ADMIN_USERNAME`:
-
-```bash
-echo '{"admin": "choose-a-strong-password"}' > config/passwords.json
-```
-
-If you skip this and leave the file absent, SimpleAuthManager will generate a
-random password on first boot and write it here — read it back with
-`cat config/passwords.json`.
-
-This file contains a secret and is **git-ignored** — never commit it. The file
-must be writable by the container UID (`AIRFLOW_UID`); if it's owned by a
-different user you'll see `Errno 30 (read-only)` or `Errno 13 (permission)`.
-
-### 4. Build and start
+### 3. Build and start
 
 ```bash
 docker compose build
 docker compose up -d
 ```
 
-`airflow-init` runs the DB migration and exits; the dag-processor, scheduler
-and API server start once it completes successfully and Postgres is healthy.
+`airflow-init` runs `airflow db migrate` (core tables), `airflow fab-db
+migrate` (FAB auth tables — separate in Airflow 3.x) and creates the admin
+user from the `AIRFLOW_ADMIN_*` env vars, then exits. The dag-processor,
+triggerer, scheduler and API server start once it completes successfully.
 
 > **Note (Airflow 3.x):** DAG files are parsed by the standalone
 > `airflow-dag-processor` service, not the scheduler. It must be running for
 > DAGs dropped into `dags/` to be detected and scheduled.
 
-### 5. Log in
+### 4. Log in
 
-Open <http://localhost:8080> and log in with `AIRFLOW_ADMIN_USERNAME` and the
-password you set in `config/passwords.json`.
+Open <http://localhost:8080> and log in with `AIRFLOW_ADMIN_USERNAME` and
+`AIRFLOW_ADMIN_PASSWORD` from `.env`.
 
 - REST API base: <http://localhost:8080/api/v2>
 
@@ -102,11 +112,10 @@ password you set in `config/passwords.json`.
 ## Day-to-day usage
 
 ```bash
-docker compose ps                 # service status
-docker compose logs -f scheduler  # follow scheduler logs
-docker compose down               # stop (keeps the database volume)
-docker compose down -v            # stop and DELETE the database volume
-docker compose build              # rebuild after changing requirements.txt
+docker compose ps                            # service status
+docker compose logs -f airflow-scheduler     # follow scheduler logs
+docker compose down                          # stop (keeps the host database)
+docker compose build                         # rebuild after changing requirements.txt
 ```
 
 - **DAGs:** drop `.py` files into `dags/`; the `airflow-dag-processor` service
@@ -116,39 +125,51 @@ docker compose build              # rebuild after changing requirements.txt
   (mounted at `/opt/airflow/data/...` in the containers).
 - **Python deps:** add to `requirements.txt`, then `docker compose build` and
   restart.
+- **Ad-hoc CLI commands:** an `airflow-cli` service runs under the `debug`
+  profile (it never starts with a normal `up`):
+
+  ```bash
+  docker compose --profile debug run --rm airflow-cli airflow dags list
+  docker compose --profile debug run --rm airflow-cli airflow users list
+  ```
 
 ---
 
 ## Adding more users
 
-Edit `.env` (or the compose env) so `SIMPLE_AUTH_MANAGER_USERS` lists each user
-as `username:Role` (roles: `Admin`, `Op`, `User`, `Viewer`), e.g.:
+Users are stored in the metadata DB and managed with the `airflow users` /
+`airflow roles` CLI (or via the UI under **Security → Users**):
 
-```
-admin:Admin,analyst:Viewer
-```
-
-Then add a matching entry for each user in `config/passwords.json`:
-
-```json
-{ "admin": "...", "analyst": "..." }
+```bash
+docker compose --profile debug run --rm airflow-cli airflow users create \
+  --username analyst --password 'choose-a-strong-password' \
+  --firstname Ana --lastname Lyst --email analyst@example.com \
+  --role Viewer
 ```
 
-Restart the stack afterwards.
+FAB roles: `Admin`, `Op`, `User`, `Viewer` (plus custom roles via
+`airflow roles create`). Auth behaviour (rate limiting, RBAC, OAuth, ...) is
+configured in `config/webserver_config.py` — FAB auto-generates a default on
+first run if the file is absent, and the `config/` mount is read-write so it
+persists.
 
 ---
 
 ## Security notes
 
-- The UI/API is bound to loopback (`127.0.0.1:8080`). To expose it on your LAN,
-  change the port mapping in `docker-compose.yaml` to `0.0.0.0:8080:8080`.
-- Postgres has no published port — it is only reachable on the internal
-  `airflow-network`.
-- `.env` and `config/passwords.json` hold secrets and are git-ignored. Keep them
-  that way.
-- The Fernet key encrypts connection/variable secrets in the metadata DB. If you
-  lose it, those secrets become unrecoverable; if you rotate it, existing
+- The UI/API is currently published on **all interfaces**
+  (`0.0.0.0:8080:8080`), so anyone on your LAN can reach the login page. To
+  restrict it to this machine, change the port mapping in `compose.yaml` to
+  `127.0.0.1:8080:8080`.
+- The metadata database is your host PostgreSQL — network access is governed
+  by `pg_hba.conf`. Keep the allowed subnet as tight as practical.
+- `.env` holds secrets (DB password, Fernet key, API secret key, admin
+  password) and is git-ignored. Keep it that way.
+- The Fernet key encrypts connection/variable secrets in the metadata DB. If
+  you lose it, those secrets become unrecoverable; if you rotate it, existing
   encrypted values can't be decrypted.
+- Set `AIRFLOW__API_AUTH__JWT_SECRET` in `.env` rather than relying on the
+  compose file's default, which is public knowledge.
 
 ---
 
@@ -156,26 +177,30 @@ Restart the stack afterwards.
 
 - **Compose exits immediately complaining about `FERNET_KEY` / `SECRET_KEY`** —
   you haven't filled them in `.env`. See step 2.
-- **Can't log in** — confirm the username in `config/passwords.json` exactly
-  matches `AIRFLOW_ADMIN_USERNAME`, and that the user appears in
-  `SIMPLE_AUTH_MANAGER_USERS`.
+- **`airflow-init` fails to connect to Postgres** — the DB is on the host, not
+  in Docker. Check, in order:
+  1. Postgres is running on the host and listening on more than `localhost`
+     (`listen_addresses` in `postgresql.conf`).
+  2. `pg_hba.conf` allows the Docker subnet (`172.16.0.0/12` typically) —
+     reload Postgres after editing.
+  3. The role/database in `POSTGRES_USER` / `POSTGRES_DB` actually exist.
+  4. From a container: `docker compose --profile debug run --rm airflow-cli bash -c "getent hosts host.docker.internal"`.
+- **Can't log in** — the admin user is created only when `airflow-init` runs
+  successfully. Check `docker compose logs airflow-init`, and verify the user
+  exists with
+  `docker compose --profile debug run --rm airflow-cli airflow users list`.
+  If you changed `AIRFLOW_ADMIN_*` after the first run, re-run the init
+  container (`docker compose up airflow-init`) or update the user via the CLI.
 - **Permission denied writing logs** — the bind-mounted dirs are owned by root.
   Set `AIRFLOW_UID` in `.env` to your `id -u` and recreate the dirs (step 1).
-- **`OSError [Errno 30] read-only file system: .../config/passwords.json`** —
-  SimpleAuthManager needs to write this file on startup. The `config/` dir must
-  be mounted read-write (it is, by default — don't add `:ro`). `Errno 13` on the
-  same path means the file is owned by a different user than `AIRFLOW_UID`;
-  `chown`/`chmod` it so the container UID can write.
 - **DAGs in `dags/` don't appear in the UI** — make sure the
   `airflow-dag-processor` service is running (`docker compose ps`). In Airflow
   3.x the scheduler does not parse DAG files; the dag-processor does. Check its
-  logs with `docker compose logs -f dag-processor`.
-- **A task is stuck in the `deferred` state** — the `airflow-triggerer` service
-  isn't running. Deferrable operators hand off to the triggerer to resume; check
-  `docker compose ps` and `docker compose logs -f triggerer`.
+  logs with `docker compose logs -f airflow-dag-processor`.
+- **A task is stuck in the `deferred` state** — the `airflow-triggerer`
+  service isn't running. Deferrable operators hand off to the triggerer to
+  resume; check `docker compose ps` and
+  `docker compose logs -f airflow-triggerer`.
 - **`http://localhost:8080` unreachable from Windows (WSL2)** — restart WSL with
-  `wsl --shutdown`; the localhost relay occasionally needs a kick.
-- **Postgres won't start after an image change** — Postgres 18 stores data under
-  `/var/lib/postgresql` (version-specific layout). Don't override `PGDATA` in
-  this compose file; if you're migrating an older volume, follow the official
-  `postgres` image upgrade notes.
+  `wsl --shutdown`; the localhost relay occasionally needs a kick. (Only
+  relevant if you switch the port mapping to loopback.)
