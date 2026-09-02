@@ -31,9 +31,9 @@ From inside containers the host is reachable as `host.docker.internal` on
 Docker Desktop (Mac/Windows) and WSL2; on native Linux the compose file maps
 it via `extra_hosts: host-gateway`.
 
-> **Note:** the API server port is currently published as `0.0.0.0:8080:8080`,
-> i.e. the UI **is reachable from your LAN**. See *Security notes* to restrict
-> it to loopback.
+> **Note:** the API server port is published as `0.0.0.0:8080:8080`, so the
+> UI/API is intentionally reachable from your LAN at `http://<host-ip>:8080`.
+> See *Security notes* for the implications and how to restrict it.
 
 ---
 
@@ -76,10 +76,11 @@ Then edit `.env` and fill in the values:
 | `AIRFLOW__API__SECRET_KEY` | `python -c "import secrets; print(secrets.token_hex(32))"` |
 | `AIRFLOW_ADMIN_USERNAME` / `AIRFLOW_ADMIN_PASSWORD` | Credentials for the initial admin account, created by `airflow-init`. |
 | `AIRFLOW_ADMIN_FIRSTNAME` / `AIRFLOW_ADMIN_LASTNAME` / `AIRFLOW_ADMIN_EMAIL` | Optional; have sensible defaults. |
-| `AIRFLOW__API_AUTH__JWT_SECRET` / `AIRFLOW__API_AUTH__JWT_ISSUER` | Optional; used to sign REST API JWTs. Set `JWT_SECRET` explicitly — the compose file's built-in default is not a secret. |
+| `AIRFLOW__API_AUTH__JWT_SECRET` / `AIRFLOW__API_AUTH__JWT_ISSUER` | Signs REST API JWTs. `JWT_SECRET` is required (no default) — generate one like the secret key above. `JWT_ISSUER` defaults to `airflow`. |
 
-> Compose will refuse to start if `FERNET_KEY` or `API__SECRET_KEY` are empty —
-> this is intentional, to avoid booting with a broken config.
+> Compose will refuse to start if `FERNET_KEY`, `API__SECRET_KEY` or
+> `JWT_SECRET` are empty — this is intentional, to avoid booting with a broken
+> or forgeable-auth config.
 >
 > `.env` is injected into the containers via `env_file`, so any
 > `AIRFLOW_CONN_*` / custom variables you add there are visible to your DAGs.
@@ -157,10 +158,13 @@ persists.
 
 ## Security notes
 
-- The UI/API is currently published on **all interfaces**
-  (`0.0.0.0:8080:8080`), so anyone on your LAN can reach the login page. To
-  restrict it to this machine, change the port mapping in `compose.yaml` to
-  `127.0.0.1:8080:8080`.
+- The UI/API is published on **all interfaces** (`0.0.0.0:8080:8080`) so it
+  is reachable from the LAN. Because of that:
+  - Use a strong `AIRFLOW_ADMIN_PASSWORD` — the FAB login page is reachable by
+    anyone on the LAN.
+  - Traffic is plain HTTP — acceptable on a trusted dev LAN, not beyond it.
+  - To restrict the UI to this machine, change the port mapping in
+    `compose.yaml` to `127.0.0.1:8080:8080`.
 - The metadata database is your host PostgreSQL — network access is governed
   by `pg_hba.conf`. Keep the allowed subnet as tight as practical.
 - `.env` holds secrets (DB password, Fernet key, API secret key, admin
@@ -168,8 +172,9 @@ persists.
 - The Fernet key encrypts connection/variable secrets in the metadata DB. If
   you lose it, those secrets become unrecoverable; if you rotate it, existing
   encrypted values can't be decrypted.
-- Set `AIRFLOW__API_AUTH__JWT_SECRET` in `.env` rather than relying on the
-  compose file's default, which is public knowledge.
+- `AIRFLOW__API_AUTH__JWT_SECRET` has no default and Compose refuses to start
+  without it — a guessable JWT secret would let anyone on the LAN forge REST
+  API tokens.
 
 ---
 

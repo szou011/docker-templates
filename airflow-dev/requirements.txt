@@ -12,3 +12,5 @@
 # Example utility packages:
 # pandas
 # requests
+polars
+apache-airflow-providers-fab

@@ -3,11 +3,11 @@
 # Extends the official image with project-specific Python dependencies.
 # =============================================================================
 
-ARG AIRFLOW_VERSION=3.0.1
+ARG AIRFLOW_VERSION=3.3.1
 FROM apache/airflow:${AIRFLOW_VERSION}
 
 # Switch to root to install any OS-level dependencies (if needed)
-USER root
+#USER root
 
 # Example: install OS packages here if required
 # RUN apt-get update && apt-get install -y --no-install-recommends \
