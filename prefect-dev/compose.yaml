@@ -1,0 +1,91 @@
+# Customised Prefect Server stack:
+#   - Uses the Postgres database running on the HOST (not a container)
+#   - No Redis: single server process uses Prefect's default in-memory
+#     messaging broker/cache, so API server and background services must
+#     run in the SAME container (in-memory messaging does not work across
+#     processes).
+#
+# Host prerequisites:
+#   1. Create the database and user on the host Postgres, e.g.:
+#        CREATE USER prefect WITH PASSWORD 'prefect';
+#        CREATE DATABASE prefect OWNER prefect;
+#   2. Postgres must accept connections from Docker containers:
+#      - macOS/Windows (Docker Desktop): host.docker.internal reaches
+#        localhost-bound services out of the box.
+#      - Linux: set listen_addresses = '0.0.0.0' (or the docker bridge IP)
+#        in postgresql.conf and add a pg_hba.conf entry for the docker
+#        subnet (e.g. 172.17.0.0/16).
+#   3. Schema migrations run automatically when the server starts.
+
+services:
+  prefect-server:
+    image: prefecthq/prefect:3-latest
+    environment:
+      # host.docker.internal resolves to the host machine. Override these
+      # via a .env file or the shell for non-default credentials.
+      PREFECT_SERVER_DATABASE_CONNECTION_URL: postgresql+asyncpg://${POSTGRES_USER:-prefect}:${POSTGRES_PASSWORD:-prefect}@host.docker.internal:${POSTGRES_PORT:-5432}/${POSTGRES_DB:-prefect}
+      # 0.0.0.0 is the BIND address inside the container (required for the
+      # port mapping to work). It is NOT a browsable URL — open the
+      # dashboard at http://localhost:4200, never http://0.0.0.0:4200
+      # (modern browsers block requests to 0.0.0.0 -> UI "load failed").
+      PREFECT_SERVER_API_HOST: 0.0.0.0
+      # Address the BROWSER uses for API calls. Must be reachable from
+      # wherever you open the UI; use the host's LAN IP instead of
+      # localhost if accessing the dashboard from another machine.
+      # PREFECT_SERVER_UI_API_URL: http://192.168.50.182:4200/api
+      # Alternatively use a more robust /api
+      PREFECT_SERVER_UI_API_URL: /api
+    command: prefect server start
+    # Restart on crash and after Docker daemon restarts, but stay stopped
+    # after a deliberate `docker compose stop`.
+    restart: unless-stopped
+    ports:
+      - "4200:4200"
+    extra_hosts:
+      # Required on Linux; harmless on Docker Desktop (Mac/Windows)
+      - "host.docker.internal:host-gateway"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request as u; u.urlopen('http://localhost:4200/api/health', timeout=1)"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+    networks:
+      - prefect-net
+
+  prefect-worker:
+    image: prefecthq/prefect:3-latest
+    depends_on:
+      prefect-server:
+        condition: service_healthy
+    environment:
+      PREFECT_API_URL: http://prefect-server:4200/api
+      # Persist flow/task results by default (can be overridden per-decorator).
+      PREFECT_RESULTS_PERSIST_BY_DEFAULT: "true"
+      # Write persisted results into the mounted data dir instead of the
+      # default ~/.prefect/storage, which is lost when the container is
+      # recreated. Must be set in the worker, where flows actually run.
+      PREFECT_LOCAL_STORAGE_PATH: /opt/prefect/data/storage
+    volumes:
+      # Flow code is edited on the host and picked up without a rebuild.
+      # Deployment entrypoints (prefect.yaml) are relative to /opt/prefect.
+      - ./flows:/opt/prefect/flows
+      # Allows registering deployments from inside the container:
+      #   docker compose exec prefect-worker prefect deploy --all
+      - ./prefect.yaml:/opt/prefect/prefect.yaml:ro
+      # Persisted results (data/storage) plus any files flows write
+      # themselves. Convention: flows write outputs under /opt/prefect/data.
+      - ./data:/opt/prefect/data
+    # --type process: creates the 'local-pool' work pool on first boot if it
+    # doesn't exist yet; ignored (type is discovered) if the pool exists.
+    command: prefect worker start --pool local-pool
+    # Same policy as the server: survives crashes and daemon restarts
+    # (on-failure would not restart after a daemon restart).
+    restart: on-failure 
+    networks: 
+      - prefect-net
+
+networks:
+  prefect-net:
+    driver: bridge
+

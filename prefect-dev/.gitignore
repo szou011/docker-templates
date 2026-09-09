@@ -1,0 +1,11 @@
+# Local secrets / environment overrides
+.env
+
+# Persisted Prefect results and flow-written data artifacts
+# (bind-mounted into the worker container at /opt/prefect/data)
+data/*
+!data/.gitkeep
+
+# Python
+__pycache__/
+*.pyc

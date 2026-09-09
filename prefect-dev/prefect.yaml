@@ -1,0 +1,21 @@
+# Deployment definitions for `prefect deploy`.
+#
+# Register deployments from inside the worker container so deploy-time and
+# run-time path resolution see the same filesystem:
+#
+#   docker compose exec prefect-worker prefect deploy --all
+#
+# The entrypoint is relative to the worker's working directory
+# (/opt/prefect), where ./flows is bind-mounted (see compose.yaml).
+# No build/push/pull steps are needed: code reaches the worker via the
+# bind mount, not via images or git.
+
+deployments:
+  - name: example
+    description: Example deployment to verify the local stack.
+    entrypoint: flows/example_flow.py:hello_flow
+    work_pool:
+      name: local-pool
+    # schedules:
+    #   - cron: "0 6 * * *"
+    #     timezone: "UTC"
