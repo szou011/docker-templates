@@ -16,21 +16,19 @@ server with minimal moving parts.
 - **Process work pool** — the worker executes flows as subprocesses *inside
   the worker container*. No Docker socket or extra infrastructure required.
 - **Flow code via bind mount** — flows are edited on the host and picked up
-  immediately; only Python dependencies are baked into the worker image.
+  immediately. Both services use the stock `prefecthq/prefect:3-latest`
+  image; nothing is baked in.
 
 ## Repository structure
 
 ```
 .
 ├── compose.yaml            # The stack: prefect-server + prefect-worker
-├── Dockerfile              # Worker image: Prefect base + flow dependencies
-├── requirements.txt        # Python deps for your flows (baked into image)
 ├── prefect.yaml            # Deployment definitions for `prefect deploy`
 ├── flows/                  # Flow code — bind-mounted into the worker
 │   └── example_flow.py     # Example demonstrating results/artifacts
-├── data/                   # Persisted results + flow-written files (gitignored)
-│   ├── storage/            #   Prefect result storage (serialized blobs)
-│   └── exports/            #   Convention: flow-written output files
+├── data/                   # Persisted results + flow-written files (gitignored;
+│                           #   subdirs like storage/ are created at runtime)
 ├── .env.example            # Template for host Postgres credentials
 └── .env                    # Your local overrides (gitignored, create from example)
 ```
@@ -61,15 +59,21 @@ Schema migrations run automatically when the server starts.
 ### Start the stack
 
 ```bash
-docker compose build prefect-worker   # builds the worker image (deps baked in)
 docker compose up -d
 ```
 
 - UI and API: <http://localhost:4200>
 - Logs: `docker compose logs -f`
 
-On first boot the worker automatically creates the `local-pool` process work
-pool (`--type process` flag; on subsequent starts the flag is ignored).
+The worker connects to the `local-pool` work pool, which it creates
+automatically on first boot if it doesn't exist yet (as a process-type
+pool); no manual setup is required.
+
+The UI is configured with `PREFECT_SERVER_UI_API_URL: /api` (a relative
+path), so it works whether opened via `localhost` or a LAN IP. If you need
+the UI to call a specific address instead, override it in `compose.yaml`
+(e.g. `http://localhost:4200/api` for local-only access, or
+`http://<lan-ip>:4200/api` for LAN access).
 
 ### Register deployments
 
@@ -109,7 +113,6 @@ docker compose down      # stop and remove containers (data/ and DB persist)
 |---|---|
 | Files in `flows/` | Nothing — bind mount picks edits up immediately |
 | Deployments in `prefect.yaml` | Re-run `prefect deploy --all` (see above) |
-| `requirements.txt` | `docker compose build prefect-worker && docker compose up -d prefect-worker` |
 | Postgres credentials | Edit `.env`, then `docker compose up -d` |
 
 **Adding a new flow**: drop a file in `flows/`, add a deployment entry in
@@ -145,22 +148,24 @@ Notes:
 
 ## Operational notes
 
-- **Restart policy**: both services use `unless-stopped` — they recover from
-  crashes and Docker daemon restarts, but stay down after a deliberate
-  `docker compose stop`.
+- **Restart policy**: both services use `unless-stopped` — they recover
+  from crashes and Docker daemon restarts, but stay down after a
+  deliberate `docker compose stop`.
 - **Server healthcheck**: `GET /api/health`; the worker waits for the server
   to be healthy before starting.
 - **Worker concurrency**: add `--limit N` to the worker command to cap
   parallel flow runs.
-- **Dependencies**: add third-party packages your flows import to
-  `requirements.txt` and rebuild — the bind mount only provides flow *code*,
-  not packages.
+- **Dependencies**: the worker runs the stock `prefecthq/prefect:3-latest`
+  image, so only the packages shipped with it are available to flows. To
+  add third-party packages, build a custom worker image (to set up additional
+  `Dockerfile`/`requirements.txt`) and add a `build:`
+  section back to `compose.yaml`.
 
 ## Known limitations / TODO
 
-- **Server image floats on `prefecthq/prefect:3-latest`** while the worker is
-  pinned to the `3-python3.12` base — the two can drift apart. Pin the server
-  to the same tag for reproducibility.
+- **Both images float on `prefecthq/prefect:3-latest`** — updates pull in
+  whatever is latest, and the two can drift apart if pulled at different
+  times. Pin both to a specific tag for reproducibility.
 - **No authentication** — the server API is unauthenticated; bind to localhost
   only (the default port mapping does) and don't expose it on a network.
 - **Single server process** — by design (in-memory messaging). Add Redis and
