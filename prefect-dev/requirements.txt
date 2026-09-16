@@ -1,9 +1,0 @@
-# Python dependencies required by your flows.
-# Baked into the worker image at build time (see Dockerfile).
-# Rebuild after editing:
-#   docker compose build prefect-worker
-#
-# Example:
-# pandas==2.2.*
-# sqlalchemy[asyncio]==2.*
-# httpx==0.27.*
