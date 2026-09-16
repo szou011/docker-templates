@@ -25,15 +25,12 @@ services:
       # via a .env file or the shell for non-default credentials.
       PREFECT_SERVER_DATABASE_CONNECTION_URL: postgresql+asyncpg://${POSTGRES_USER:-prefect}:${POSTGRES_PASSWORD:-prefect}@host.docker.internal:${POSTGRES_PORT:-5432}/${POSTGRES_DB:-prefect}
       # 0.0.0.0 is the BIND address inside the container (required for the
-      # port mapping to work). It is NOT a browsable URL — open the
-      # dashboard at http://localhost:4200, never http://0.0.0.0:4200
-      # (modern browsers block requests to 0.0.0.0 -> UI "load failed").
+      # port mapping to work). 
       PREFECT_SERVER_API_HOST: 0.0.0.0
-      # Address the BROWSER uses for API calls. Must be reachable from
-      # wherever you open the UI; use the host's LAN IP instead of
-      # localhost if accessing the dashboard from another machine.
-      # PREFECT_SERVER_UI_API_URL: http://192.168.50.182:4200/api
-      # Alternatively use a more robust /api
+      # Address the BROWSER uses for API calls. Must be reachable from wherever you open the UI      
+      # PREFECT_SERVER_UI_API_URL: http://localhost:4200/api (use localhost if the UI is opened on the docker host)
+      # PREFECT_SERVER_UI_API_URL: http://192.168.1.10:4200/api (use LAN IP if the UI is opened on the machine within the same LAN)
+      # alternatively just use /api
       PREFECT_SERVER_UI_API_URL: /api
     command: prefect server start
     # Restart on crash and after Docker daemon restarts, but stay stopped
@@ -80,8 +77,7 @@ services:
     # doesn't exist yet; ignored (type is discovered) if the pool exists.
     command: prefect worker start --pool local-pool
     # Same policy as the server: survives crashes and daemon restarts
-    # (on-failure would not restart after a daemon restart).
-    restart: on-failure 
+    restart: unless-stopped
     networks: 
       - prefect-net
 
